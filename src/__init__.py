@@ -1,0 +1,1 @@
+"""Forward-Forward extension package."""
