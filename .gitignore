@@ -33,7 +33,7 @@ dist/
 *.log
 
 # Data and experiment outputs (regenerable)
-data/
+/data/
 results/
 
 arXiv-2212.13345v1/

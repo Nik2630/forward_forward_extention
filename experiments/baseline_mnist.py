@@ -8,6 +8,7 @@ import torch
 
 from src.data.loaders import build_mnist_loaders
 from src.data.preprocessing import overlay_label_one_hot, sample_incorrect_labels
+from src.goodness.factory import build_goodness
 from src.goodness.squared_sum import SquaredSumGoodness
 from src.goodness.unsquared_sum import UnsquaredSumGoodness
 from src.models.ff_network import FFNetwork
@@ -40,10 +41,35 @@ def evaluate(model: FFNetwork, data_loader, device: torch.device) -> float:
 
 def resolve_norm_mode(goodness: str, norm_mode: str) -> str:
     if norm_mode != "auto":
-        if goodness == "unsquared" and norm_mode != "l1":
+        if goodness in {"unsquared", "unsquared_sum", "sum"} and norm_mode != "l1":
             raise ValueError("Unsquared goodness requires l1 normalization")
         return norm_mode
-    return "l1" if goodness == "unsquared" else "l2"
+    return "l1" if goodness in {"unsquared", "unsquared_sum", "sum"} else "l2"
+
+
+def _parse_goodness_kwargs(raw: str) -> dict[str, float | int]:
+    if not raw.strip():
+        return {}
+    parsed: dict[str, float | int] = {}
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError("goodness kwargs must be in key=value format")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise ValueError("goodness kwarg key cannot be empty")
+        try:
+            if any(ch in value for ch in [".", "e", "E"]):
+                parsed[key] = float(value)
+            else:
+                parsed[key] = int(value)
+        except ValueError:
+            parsed[key] = float(value)
+    return parsed
 
 
 def main() -> None:
@@ -57,6 +83,8 @@ def main() -> None:
     parser.add_argument("--threshold", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--goodness", type=str, default="squared", choices=["squared", "unsquared"])
+    parser.add_argument("--goodness-name", type=str, default="")
+    parser.add_argument("--goodness-kwargs", type=str, default="")
     parser.add_argument("--activation", type=str, default="relu")
     parser.add_argument("--norm-mode", type=str, default="auto", choices=["auto", "l1", "l2"])
     parser.add_argument("--student-df", type=float, default=2.0)
@@ -71,7 +99,9 @@ def main() -> None:
     set_seed(args.seed)
     device = torch.device("cpu")
 
-    norm_mode = resolve_norm_mode(args.goodness, args.norm_mode)
+    goodness_name = args.goodness_name.strip() if args.goodness_name.strip() else args.goodness
+    norm_mode = resolve_norm_mode(goodness_name, args.norm_mode)
+    goodness_kwargs = _parse_goodness_kwargs(args.goodness_kwargs)
     train_subset = args.train_subset if args.train_subset > 0 else None
     train_loader, val_loader, test_loader = build_mnist_loaders(
         args.data_dir,
@@ -82,8 +112,11 @@ def main() -> None:
     )
 
     hidden_dims = [args.hidden_dim] * args.layers
-    goodness_cls = SquaredSumGoodness if args.goodness == "squared" else UnsquaredSumGoodness
-    goodness_fns = [goodness_cls() for _ in hidden_dims]
+    if goodness_name in {"squared", "unsquared"}:
+        goodness_cls = SquaredSumGoodness if goodness_name == "squared" else UnsquaredSumGoodness
+        goodness_fns = [goodness_cls() for _ in hidden_dims]
+    else:
+        goodness_fns = [build_goodness(goodness_name, **goodness_kwargs) for _ in hidden_dims]
 
     model = FFNetwork(
         input_dim=28 * 28,
@@ -145,7 +178,7 @@ def main() -> None:
                 "val_error_pct": val_err,
                 "test_error_pct": test_err,
                 "activation": args.activation,
-                "goodness": args.goodness,
+                "goodness": goodness_name,
                 "norm_mode": norm_mode,
                 "hidden_dim": args.hidden_dim,
                 "layers": args.layers,
